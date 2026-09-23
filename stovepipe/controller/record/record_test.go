@@ -17,6 +17,7 @@ package record
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -34,6 +35,9 @@ import (
 	"github.com/uber/submitqueue/stovepipe/core/requestlog"
 	requestlogmock "github.com/uber/submitqueue/stovepipe/core/requestlog/mock"
 	"github.com/uber/submitqueue/stovepipe/entity"
+	"github.com/uber/submitqueue/stovepipe/extension/projectresult"
+	projectresultmock "github.com/uber/submitqueue/stovepipe/extension/projectresult/mock"
+	projectresultnoop "github.com/uber/submitqueue/stovepipe/extension/projectresult/noop"
 	"github.com/uber/submitqueue/stovepipe/extension/sourcecontrol"
 	sourcecontrolmock "github.com/uber/submitqueue/stovepipe/extension/sourcecontrol/mock"
 	"github.com/uber/submitqueue/stovepipe/extension/storage"
@@ -194,6 +198,7 @@ func newControllerForTopic(t *testing.T, ctrl *gomock.Controller, topicKey consu
 		scope,
 		staticStorageFactory{store: m.store},
 		m.materializer,
+		projectresultnoop.New(),
 		staticSourceControlFactory{sourceControl: m.sourceControl},
 		registry,
 		topicKey,
@@ -323,6 +328,75 @@ func TestProcess_AdvancesBookmarkOnSuccess(t *testing.T) {
 			assert.Positive(t, fact.CreatedAt)
 		})
 	}
+}
+
+func TestProcess_RecordsNamedProjectResults(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	c, m := newController(t, ctrl)
+	eventMaterializer := requestlogmock.NewMockMaterializer(ctrl)
+	c.materializer = eventMaterializer
+	projectResultFactory := projectresultmock.NewMockFactory(ctrl)
+	projectResultResolver := projectresultmock.NewMockResolver(ctrl)
+	c.projectResultFactory = projectResultFactory
+	projectResultFactory.EXPECT().For(projectresult.Config{QueueName: testQueue}).
+		Return(projectResultResolver, nil)
+	projectResultResolver.EXPECT().Resolve(gomock.Any(), gomock.Any()).Return([]projectresult.Result{
+		{Project: "project-a", Degree: entity.DegreeBroken},
+		{Project: "project-b", Degree: entity.DegreeBroken},
+	}, nil)
+	m.reqStore.EXPECT().Get(gomock.Any(), testID).Return(requestWithState(entity.RequestStateFailed), nil)
+
+	var facts []entity.ValidationFact
+	m.factStore.EXPECT().Create(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, fact entity.ValidationFact) error {
+			facts = append(facts, fact)
+			return nil
+		}).
+		Times(3)
+
+	var logs []entity.RequestLog
+	eventMaterializer.EXPECT().PersistLog(gomock.Any(), m.store, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ storage.Storage, log entity.RequestLog) error {
+			logs = append(logs, log)
+			return nil
+		}).
+		Times(2)
+
+	require.NoError(t, c.Process(queueContext(), delivery(t, ctrl, recordPayload(t, testID))))
+	require.Len(t, facts, 3)
+	assert.Equal(t, []string{"", "project-a", "project-b"}, []string{facts[0].Project, facts[1].Project, facts[2].Project})
+	for _, fact := range facts {
+		assert.Equal(t, testURI, fact.URI)
+		assert.Equal(t, testID, fact.RequestID)
+		assert.Equal(t, entity.DegreeBroken, fact.Degree)
+		assert.Positive(t, fact.CreatedAt)
+	}
+	require.Len(t, logs, 2)
+	assert.Equal(t, entity.RequestEventValidationFactRecorded, logs[0].Event)
+	assert.Equal(t, entity.RequestEventProjectFactsRecorded, logs[1].Event)
+	assert.Equal(t, "2", logs[1].Metadata[requestlog.MetadataKeyProjectFactCount])
+}
+
+func TestProcess_RejectsInvalidProjectResultsBeforeWritingFacts(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	c, m := newController(t, ctrl)
+	projectResultFactory := projectresultmock.NewMockFactory(ctrl)
+	projectResultResolver := projectresultmock.NewMockResolver(ctrl)
+	c.projectResultFactory = projectResultFactory
+	projectResultFactory.EXPECT().For(projectresult.Config{QueueName: testQueue}).
+		Return(projectResultResolver, nil)
+	projectResultResolver.EXPECT().Resolve(gomock.Any(), gomock.Any()).Return([]projectresult.Result{
+		{Project: "project-a", Degree: entity.DegreeBroken},
+		{Project: "project-b", Degree: math.NaN()},
+	}, nil)
+	m.reqStore.EXPECT().Get(gomock.Any(), testID).Return(requestWithState(entity.RequestStateFailed), nil)
+	var fact entity.ValidationFact
+	m.expectFactCreated(&fact)
+
+	err := c.Process(queueContext(), delivery(t, ctrl, recordPayload(t, testID)))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "invalid degree")
+	assert.Equal(t, wholeRepositoryProject, fact.Project)
 }
 
 func TestProcess_TimestampReportingFailureDoesNotFailRecord(t *testing.T) {

@@ -7,6 +7,7 @@ Stovepipe retains an append-only request log for each validation request. Its in
 - `build_triggered`;
 - `build_finished`;
 - `validation_fact_recorded`;
+- `project_facts_recorded`;
 - `record_abandoned`.
 
 The model deliberately follows SubmitQueue's distinction between statuses describing where a request is and events describing important activity that does not move it. It remains a bounded request-lifecycle log rather than a generic event bus or an audit of every correlated operation.
@@ -32,7 +33,7 @@ The following remain with their owning entities, metrics, or structured logs:
 
 - Queue latest-request and last-green bookmarks;
 - source-control promotion;
-- project analysis and project facts;
+- project analysis and individual project facts;
 - hooks and downstream notifications;
 - build-slot claims, waits, and releases;
 - queue handoffs, delivery attempts, holds, nacks, and visibility timeouts;
@@ -123,9 +124,10 @@ Immutable Request context such as URI, build strategy, and base URI remains on `
 | `build_triggered` | A runner accepted a build and its Build row became durable. | Build ID metadata and creation time |
 | `build_finished` | The Build first reached a write-once terminal status. | Build ID metadata and status-change time |
 | `validation_fact_recorded` | The immutable whole-repository fact became durable. | Degree metadata and fact creation time |
+| `project_facts_recorded` | All project validation facts returned for a request became durable. | Project-fact count metadata and completion time |
 | `record_abandoned` | Record-stage work stopped after exhausting primary retries. | Event retention time |
 
-Build running and unchanged polls are not retained. Trigger and terminal result explain the request outcome without turning polling into an unbounded log. Project facts remain outside the initial vocabulary.
+Build running and unchanged polls are not retained. Trigger and terminal result explain the request outcome without turning polling into an unbounded log. Individual project facts remain outside the vocabulary; one batch-completion event summarizes their durable recording.
 
 ### Evolution
 
@@ -157,6 +159,7 @@ SubmitQueue applies that identity to the message carrying a log to its materiali
 | Build triggered | Request ID, event kind, and build ID |
 | Build finished | Request ID, event kind, and build ID |
 | Validation fact recorded | Request ID, event kind, and whole-repository fact identity |
+| Project facts recorded | Request ID, event kind, and the completed project-fact batch |
 
 The controller passes the materializer the same queue-scoped storage aggregate used for the source write. The materializer preserves a supplied occurrence time or assigns the current time immediately before the first insertion attempt, then calls `RequestLogStore.Create`. If the ID already exists, it loads the stored record and compares the explicitly designated stable semantic fields. The first successfully retained timestamp is authoritative and is not compared with a later retry's newly sampled time. Metadata keys emitted by both records must agree, while a key present on only one record remains compatible so an additive metadata rollout does not turn retries of older occurrences into conflicts. Compatible content is idempotent success; conflicting content is an internal consistency error, and the stored record is never overwritten or enriched.
 
@@ -209,7 +212,7 @@ Request creation, Build changes, and fact creation use the same source-write, lo
 | Process | CAS to superseded or processing, then retain that state. | An existing state is reconstructed from Request context before ack or build publication. |
 | Build | Create Build after runner acceptance, then retain `build_triggered`. | An identical existing Build ensures the event before buildsignal publication. |
 | Buildsignal | Persist terminal Build and retain `build_finished`; CAS the Request outcome and retain its terminal state. | Existing terminal Build and Request outcome each ensure their own entry before record publication. |
-| Record | Create or verify the whole-repository fact, then retain `validation_fact_recorded`. | An identical fact owned by the Request ensures the event before bookmark or promotion work. |
+| Record | Create or verify the whole-repository fact, then retain `validation_fact_recorded`; after recording project facts, retain one `project_facts_recorded` event. | An identical whole-repository fact and project-fact batch ensure their events before bookmark or promotion work. |
 | Record DLQ | Retain `record_abandoned`, then acknowledge the remaining record work. | The stable event ID makes history retention idempotent without replaying facts, bookmarks, promotion, or hooks. |
 | Reconciler | CAS an unrecoverable non-terminal Request to failed, then retain failed. | An existing terminal Request is repaired from its persisted outcome without relabeling it. |
 

@@ -28,6 +28,8 @@ const (
 	RequestEventBuildFinished RequestEvent = "build_finished"
 	// RequestEventValidationFactRecorded records that an immutable validation verdict was established.
 	RequestEventValidationFactRecorded RequestEvent = "validation_fact_recorded"
+	// RequestEventProjectFactsRecorded records that all project validation facts for a request were established.
+	RequestEventProjectFactsRecorded RequestEvent = "project_facts_recorded"
 	// RequestEventRecordAbandoned records that record-stage work stopped after exhausting retries.
 	RequestEventRecordAbandoned RequestEvent = "record_abandoned"
 )
@@ -135,7 +137,7 @@ func (e RequestLog) validateEvent() error {
 		return fmt.Errorf("event log must not contain request-state context")
 	}
 	switch e.Event {
-	case RequestEventBuildTriggered, RequestEventBuildFinished, RequestEventValidationFactRecorded, RequestEventRecordAbandoned:
+	case RequestEventBuildTriggered, RequestEventBuildFinished, RequestEventValidationFactRecorded, RequestEventProjectFactsRecorded, RequestEventRecordAbandoned:
 	default:
 		return fmt.Errorf("unknown request event %q", e.Event)
 	}
